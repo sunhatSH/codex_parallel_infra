@@ -1,0 +1,233 @@
+"""Assemble and observe one `codex exec` run inside a sandbox.
+
+Responsibilities (and nothing else):
+  - build the argv for `codex exec` from prompt + per-task codex_config
+  - prepare an isolated CODEX_HOME on the sandbox and write auth.json there
+  - run it via the backend's Sandbox.run
+  - classify the outcome: ok / auth_failed / timeout / failed
+
+The runner is backend-agnostic: it only needs a Sandbox with run/upload.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class CodexRunResult:
+    ok: bool
+    exit_code: int
+    auth_failed: bool
+    timed_out: bool
+    transient: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    last_message: str = ""
+    events: list[dict] = field(default_factory=list)
+    error: str = ""
+
+    @property
+    def failure_kind(self) -> str:
+        """Failure attribution for the health module.
+
+        account_dead  → credential rejected; scheduler must swap to a NEW token
+        transient     → retry the SAME token (3 chances total)
+        timeout/failed → infra-level failure, also retried on same token
+        """
+        if self.ok:
+            return "done"
+        if self.timed_out:
+            return "timeout"
+        if self.auth_failed:
+            return "account_dead"
+        if self.transient:
+            return "transient"
+        return "failed"
+
+
+# Markers meaning the ACCOUNT is dead → scheduler swaps in a new token.
+ACCOUNT_DEAD_MARKERS = (
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "invalid api key",
+    "invalid_api_key",
+    "account suspended",
+    "account disabled",
+    "token expired",
+    "session expired",
+    "not logged in",
+    "login required",
+)
+
+# Markers meaning a transient problem → same token gets retried (3 chances).
+TRANSIENT_MARKERS = (
+    "timeout",
+    "timed out",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "429",
+    "502",
+    "503",
+    "504",
+    "overloaded",
+    "network",
+    "connection reset",
+    "connection refused",
+    "econnreset",
+    "temporarily unavailable",
+)
+
+
+@dataclass
+class CodexRunner:
+    codex_bin: str = "codex"
+    model: str | None = None
+    sandbox_mode: str = "workspace-write"
+    reasoning_effort: str | None = None
+    extra_args: list[str] = field(default_factory=list)
+
+    def build_argv(self, prompt: str) -> list[str]:
+        argv = [
+            self.codex_bin,
+            "exec",
+            "--skip-git-repo-check",
+            "--sandbox",
+            self.sandbox_mode,
+            "--json",
+            "-o",
+            "result-last.md",
+        ]
+        if self.model:
+            argv += ["-m", self.model]
+        if self.reasoning_effort:
+            argv += ["-c", f"model_reasoning_effort={self.reasoning_effort!r}"]
+        argv += self.extra_args
+        argv.append("--")
+        argv.append(prompt)
+        return argv
+
+    async def prepare_auth(self, sandbox, token_secret: str) -> dict[str, str]:
+        """Write auth.json into the sandbox's CODEX_HOME; return the env overlay.
+
+        token_secret is either raw JSON (an auth.json body) or a bare API key;
+        we normalize both into a valid auth.json payload.
+        """
+        secret = token_secret.strip()
+        if secret.startswith("{"):
+            try:
+                parsed = json.loads(secret)
+                if "OPENAI_API_KEY" in parsed or "auth_mode" in parsed:
+                    payload = secret
+                else:
+                    payload = json.dumps({"OPENAI_API_KEY": secret})
+            except json.JSONDecodeError:
+                payload = json.dumps({"OPENAI_API_KEY": secret})
+        else:
+            payload = json.dumps({"OPENAI_API_KEY": secret})
+
+        await sandbox.upload_text(".codex-home/auth.json", payload) if hasattr(
+            sandbox, "upload_text"
+        ) else await self._upload_text_via_file(sandbox, payload)
+        return {}
+
+    async def _upload_text_via_file(self, sandbox, payload: str) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            f.write(payload)
+            tmp = f.name
+        try:
+            await sandbox.upload(tmp, ".codex-home/auth.json")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    async def run(
+        self,
+        sandbox,
+        prompt: str,
+        *,
+        timeout_s: int,
+        env: dict[str, str] | None = None,
+    ) -> CodexRunResult:
+        full_env = dict(env or {})
+        full_env.setdefault("CODEX_HOME", ".codex-home")
+
+        res = await sandbox.run(
+            self.build_argv(prompt), timeout_s=timeout_s, env=full_env
+        )
+        events = self._parse_events(res.stdout)
+        last_message = self._extract_last_message(events)
+        combined = res.stderr + res.stdout
+        auth_failed = (
+            not res.ok
+            and not res.timed_out
+            and self._account_dead(combined)
+        )
+        transient = (
+            not res.ok and not res.timed_out and not auth_failed and self._transient(combined)
+        )
+        return CodexRunResult(
+            ok=res.ok,
+            exit_code=res.exit_code,
+            auth_failed=auth_failed,
+            timed_out=res.timed_out,
+            transient=transient,
+            stdout=res.stdout[-20000:],
+            stderr=res.stderr[-8000:],
+            last_message=last_message,
+            events=events,
+            error=(res.stderr or res.stdout)[-4000:] if not res.ok else "",
+        )
+
+    async def fetch_last_message(self, sandbox, remote_path: str = "result-last.md") -> str:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            tmp = f.name
+        try:
+            await sandbox.download(remote_path, tmp)
+            return Path(tmp).read_text()
+        except (FileNotFoundError, Exception):
+            return ""
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    # ── parsing helpers ──────────────────────────────────────────────── #
+
+    @staticmethod
+    def _parse_events(stdout: str) -> list[dict]:
+        events = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+
+    @staticmethod
+    def _extract_last_message(events: list[dict]) -> str:
+        for ev in reversed(events):
+            msg = ev.get("msg") or ev.get("message") or ""
+            etype = ev.get("type") or ""
+            if "agent_message" in str(etype) and msg:
+                return str(msg)
+        return ""
+
+    @staticmethod
+    def _account_dead(combined: str) -> bool:
+        lowered = combined.lower()
+        return any(marker in lowered for marker in ACCOUNT_DEAD_MARKERS)
+
+    @staticmethod
+    def _transient(combined: str) -> bool:
+        lowered = combined.lower()
+        return any(marker in lowered for marker in TRANSIENT_MARKERS)

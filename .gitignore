@@ -1,0 +1,8 @@
+data/
+web-react/node_modules/
+web-react/dist/
+*.pyc
+__pycache__/
+*.egg-info/
+.pytest_cache/
+nohup.out
