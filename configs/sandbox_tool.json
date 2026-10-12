@@ -1,0 +1,50 @@
+{
+  "_comment": "Agent Runtime custom sandbox TOOL for codex-parallel-infra. Create with: tccli ags CreateSandboxTool --region ap-beijing --cli-input-json file://configs/sandbox_tool.json",
+  "ToolName": "codex-parallel-sandbox",
+  "ToolType": "custom",
+  "Description": "Codex Parallel Hub worker — sandbox-code base + Node + @openai/codex CLI; one instance = one codex exec worker",
+  "DefaultTimeout": "30m",
+  "NetworkConfiguration": {
+    "NetworkMode": "VPC",
+    "VpcConfig": {
+      "SubnetIds": [
+        "subnet-ljfuh7ln"
+      ],
+      "SecurityGroupIds": [
+        "sg-irz5h5ed"
+      ]
+    }
+  },
+  "RoleArn": "qcs::cam::uin/100048510516:roleName/AgentOS-260506-test",
+  "CustomConfiguration": {
+    "Image": "tcr-rl.tencentcloudcr.com/agentos-cl-namespace/codex-parallel-sandbox:v1",
+    "ImageRegistryType": "enterprise",
+    "Command": [
+      "/init"
+    ],
+    "Ports": [
+      {
+        "Name": "envd",
+        "Port": 49983,
+        "Protocol": "TCP"
+      }
+    ],
+    "Resources": {
+      "CPU": "2",
+      "Memory": "4Gi",
+      "Storage": "10Gi"
+    },
+    "Probe": {
+      "HttpGet": {
+        "Path": "/health",
+        "Port": 49983,
+        "Scheme": "HTTP"
+      },
+      "ReadyTimeoutMs": 30000,
+      "ProbeTimeoutMs": 2000,
+      "ProbePeriodMs": 5000,
+      "SuccessThreshold": 1,
+      "FailureThreshold": 36
+    }
+  }
+}
