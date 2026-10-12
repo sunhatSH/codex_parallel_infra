@@ -61,11 +61,12 @@ def serve(
 
 @app.command()
 def status(base: str = typer.Option(DEFAULT_URL, "--url")) -> None:
-    """Hub health + token pool + task summary."""
+    """Hub health + token pool + task summary + active alerts."""
     with _client(base) as c:
         health = c.get("/api/health").json()
         tokens = c.get("/api/tokens/stats").json()
         tasks = c.get("/api/tasks").json()
+        alerts = c.get("/api/alerts").json()
     running = [t for t in tasks if t["status"] == "running"]
     print(f"hub: {health.get('hub_id')} ({'UP' if health.get('ok') else 'DOWN'})")
     print(
@@ -73,6 +74,29 @@ def status(base: str = typer.Option(DEFAULT_URL, "--url")) -> None:
         f"{tokens['discarded']} discarded / {tokens['in_use']} in-use"
     )
     print(f"tasks: {len(tasks)} total, {len(running)} running")
+    if alerts:
+        print()
+        typer.secho("⚠ ACTIVE ALERTS:", fg=typer.colors.RED, err=True)
+        for a in alerts:
+            typer.secho(f"  [#{a['id']}] {a['message']}", fg=typer.colors.RED, err=True)
+        typer.secho(
+            "  补充 token: codex-parallel token add-bulk <file>", fg=typer.colors.YELLOW, err=True
+        )
+
+
+@app.command()
+def alerts(
+    base: str = typer.Option(DEFAULT_URL, "--url"),
+    resolve: int = typer.Option(None, "--resolve", help="alert id to resolve"),
+) -> None:
+    """List (or resolve) token-pool alerts."""
+    with _client(base) as c:
+        if resolve is not None:
+            r = c.post(f"/api/alerts/{resolve}/resolve")
+            r.raise_for_status()
+            _print(r.json(), False)
+            return
+        _print(c.get("/api/alerts").json(), False)
 
 
 # ── token commands ──────────────────────────────────────────────────── #

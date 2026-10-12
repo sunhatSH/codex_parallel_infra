@@ -22,7 +22,7 @@ from .attribution import MAX_STRIKES, attribute
 from .codex_runner import CodexRunner, CodexRunResult
 from .config import HubConfig
 from .health import HealthMonitor
-from .models import Task, TaskItem, Token, WorkerRun, utcnow
+from .models import PoolAlert, Task, TaskItem, Token, WorkerRun, utcnow
 from .token_pool import _as_utc
 from .token_pool import NoTokenAvailable, TokenPool
 
@@ -353,10 +353,16 @@ class Scheduler:
         finally-block KILLS that sandbox and the loop CREATES a new one for
         the next attempt — dead sandboxes never get reused.
 
+        A token IS an account (1:1, pool enforces max_concurrency=1). Before
+        the task attempt runs, a login probe verifies the account inside the
+        sandbox: ordinary offline → retry same account 3x (fresh sandbox each
+        time); explicit auth rejection (401/403/invalid) → token marked
+        unusable immediately and a different account is pulled.
+
         - account_dead      → swap to a NEW token immediately (token banned)
         - transient/timeout/failed → retry SAME token, 3 chances total
         - 3 strikes on one token → discard that token, pull a new one
-        - out of tokens / attempts → item fails
+        - out of tokens / attempts → item fails + pool-exhausted alert fires
         """
         task_id = item.task_id
         item_id = item.id
@@ -370,6 +376,7 @@ class Scheduler:
             if token is None:
                 token = await self._acquire_token_with_backoff(quick_exhausted=True)
                 if token is None:
+                    self._alert_pool_exhausted()
                     self._fail_item(item_id, "no tokens available")
                     return
                 token_strikes = 0
@@ -395,6 +402,35 @@ class Scheduler:
                     )
                     s.commit()
                 secret = self._tokens.read_secret(token.id)
+
+                # ── checkpoint: account login probe (fresh sandbox, this token)
+                probe = await self._login_probe(sandbox, secret)
+                if probe.account_dead:
+                    # account-level failure: token unusable NOW, no retries
+                    self._tokens.report_banned(token.id, reason=f"login probe: {probe.detail[:100]}")
+                    log.warning(
+                        "item %s: account %s dead at login (token banned)",
+                        item_id, token.label,
+                    )
+                    token = None  # finally-block destroys this sandbox
+                    total_swaps += 1
+                    continue
+                if not probe.ok:
+                    # ordinary offline: destroy sandbox, same account, ≤3 tries
+                    token_strikes += 1
+                    log.info(
+                        "item %s: login transient (%s), strike %d/3",
+                        item_id, probe.detail[:80], token_strikes,
+                    )
+                    if token_strikes >= MAX_STRIKES:
+                        self._tokens.report_discard(
+                            token.id, reason="login transient x3"
+                        )
+                        token = None
+                        continue
+                    await asyncio.sleep(min(2**token_strikes, 15))
+                    continue
+
                 env = await runner.prepare_auth(sandbox, secret)
                 hb = asyncio.create_task(
                     self._heartbeat_loop(run_id), name=f"hb-{run_id}"
@@ -434,6 +470,7 @@ class Scheduler:
                     token = None
                     total_swaps += 1
                     if total_swaps > 20:  # safety valve against loops
+                        self._alert_pool_exhausted()
                         self._fail_item(item_id, "too many token swaps")
                         return
                     continue
@@ -488,6 +525,44 @@ class Scheduler:
         while True:
             await asyncio.sleep(self._cfg.worker_heartbeat_s)
             await self.health.beat(run_id)
+
+    # ── login probe ──────────────────────────────────────────────────── #
+
+    async def _login_probe(self, sandbox, secret: str):
+        """Verify the account credential inside this sandbox before the task.
+
+        Wrapped so a probe crash degrades to "transient" (ordinary offline,
+        retryable) rather than killing the worker.
+        """
+        from .login_probe import LoginProber
+
+        if not hasattr(self, "_prober"):
+            self._prober = LoginProber(timeout_s=self._cfg.login_probe_timeout_s)
+        try:
+            return await self._prober.probe(sandbox, secret)
+        except Exception as e:  # noqa: BLE001
+            log.warning("login probe crashed: %s", e)
+            from .login_probe import LoginCheckResult
+
+            return LoginCheckResult(False, False, True, f"probe crash: {e}")
+
+    # ── pool-exhaustion alerting ─────────────────────────────────────── #
+
+    def _alert_pool_exhausted(self) -> None:
+        """Token pool empty: record alert (DB) so CLI + web can surface it."""
+        try:
+            with self._session() as s:
+                alert = PoolAlert(
+                    message="token pool exhausted: no usable accounts (active=0, "
+                    "all banned/discarded or never imported)",
+                    hub_id=self.hub_id,
+                )
+                s.add(alert)
+                s.commit()
+            log.error("TOKEN POOL EXHAUSTED — import tokens via CLI/web: "
+                      "codex-parallel token add-bulk")
+        except Exception:  # noqa: BLE001
+            log.exception("failed to record pool alert")
 
     async def _acquire_token_with_backoff(
         self, *, max_wait_s: float = 600.0, quick_exhausted: bool = False

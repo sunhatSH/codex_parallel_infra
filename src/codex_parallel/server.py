@@ -240,6 +240,47 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
             "frontend": "web-react/ (npm run dev)",
         }
 
+    # ── pool alerts ──────────────────────────────────────────────────── #
+
+    @app.get("/api/alerts")
+    async def list_alerts():
+        """Active pool alerts (web 弹窗 + CLI 拉取)。"""
+        from sqlalchemy import select
+
+        from .models import PoolAlert
+
+        with session_factory() as s:
+            alerts = list(
+                s.execute(
+                    select(PoolAlert)
+                    .where(PoolAlert.status == "active")
+                    .order_by(PoolAlert.id.desc())
+                    .limit(20)
+                ).scalars()
+            )
+            return [
+                {
+                    "id": a.id,
+                    "message": a.message,
+                    "hub_id": a.hub_id,
+                    "created_at": iso(a.created_at),
+                }
+                for a in alerts
+            ]
+
+    @app.post("/api/alerts/{alert_id}/resolve")
+    async def resolve_alert(alert_id: int):
+        from .models import PoolAlert
+
+        with session_factory() as s:
+            a = s.get(PoolAlert, alert_id)
+            if a is None:
+                raise HTTPException(404, "alert not found")
+            a.status = "resolved"
+            a.resolved_at = utcnow()
+            s.commit()
+        return {"ok": True}
+
     @app.exception_handler(Exception)
     async def unhandled(request, exc):
         return JSONResponse(status_code=500, content={"detail": str(exc)})

@@ -94,17 +94,21 @@ class TestSandboxRestart:
     async def test_hung_codex_killed_and_item_survives(self, env, monkeypatch):
         """A hung sandbox is killed on timeout; retry runs in a new sandbox."""
         sf, tp, cfg, tmp = env
-        # first attempt hangs, then a state flip makes later attempts ok
+        # first EXEC hangs, then a state flip makes later attempts ok.
+        # `login status` must always succeed so the probe path is not under
+        # test here (probe increments the same state counter otherwise).
         state = tmp / "hang-state"
         monkeypatch.setenv("MOCK_STATE_FILE", str(state))
-        # custom mode: hang first, then ok
         shim_extra = tmp / "bin" / "codex-hang-then-ok"
         shim_extra.write_text(
             "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = login ] && [ \"$2\" = status ]; then\n"
+            "  echo 'Logged in using an API key'; exit 0\n"
+            "fi\n"
             "n=$(cat '" + str(state) + "' 2>/dev/null || echo 0)\n"
             "n=$((n+1)); echo $n > '" + str(state) + "'\n"
             "if [ $n -lt 2 ]; then sleep 60; exit 1; fi\n"
-            f'exec bash {MOCK}\n'
+            f'exec bash {MOCK} "$@"\n'
         )
         shim_extra.chmod(0o755)
         (tmp / "bin" / "codex").write_text(f"#!/usr/bin/env bash\nexec bash {shim_extra} \"$@\"\n")

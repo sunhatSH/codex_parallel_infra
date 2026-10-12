@@ -10,6 +10,7 @@ function App() {
   const [stats, setStats] = useState(null)
   const [down, setDown] = useState(false)
   const [toastMsg, setToastMsg] = useState('')
+  const [alerts, setAlerts] = useState([])
   const toastTimer = useRef(null)
 
   const toast = useCallback((msg) => {
@@ -23,11 +24,13 @@ function App() {
       const h = await api('/api/health')
       setHubId(h.hub_id || '')
       setDown(false)
-      const [tokens, tasks] = await Promise.all([
+      const [tokens, tasks, alerts] = await Promise.all([
         api('/api/tokens/stats'),
         api('/api/tasks'),
+        api('/api/alerts'),
       ])
       setStats({ tokens, tasks })
+      setAlerts(alerts)
     } catch {
       setDown(true)
     }
@@ -44,6 +47,16 @@ function App() {
   const doneItems = s ? s.tasks.reduce((a, t) => a + (t.items.done || 0), 0) : 0
   const totalItems = s ? s.tasks.reduce((a, t) => a + t.total, 0) : 0
 
+  async function resolveAlert(id) {
+    try {
+      await api(`/api/alerts/${id}/resolve`, { method: 'POST' })
+      toast(`告警 #${id} 已解决`)
+      refreshHeader()
+    } catch (e) {
+      toast(e.message)
+    }
+  }
+
   return (
     <>
       <header>
@@ -54,6 +67,15 @@ function App() {
           <button className={view === 'tokens' ? 'active' : ''} onClick={() => setView('tokens')}>Token 池</button>
         </nav>
       </header>
+
+      {alerts.length > 0 && (
+        <div className="alert-banner">
+          <div className="alert-text">
+            ⚠ {alerts[0].message}
+          </div>
+          <button onClick={() => resolveAlert(alerts[0].id)}>知道了</button>
+        </div>
+      )}
 
       <main>
         {down ? (

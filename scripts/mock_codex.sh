@@ -7,12 +7,38 @@
 #   MOCK_CODEX_MODE=flaky         → fail until MOCK_CODEX_SUCCESS_AT attempts seen
 #                                   (attempt count tracked in MOCK_STATE_FILE)
 #   MOCK_CODEX_MODE=echo-secret   → print CODEX_HOME/auth.json contents (leak test)
+#   MOCK_CODEX_LOGIN=ok           → `login status` reports logged in (default)
+#   MOCK_CODEX_LOGIN=dead         → `login status` reports 401 (account dead)
+#   MOCK_CODEX_LOGIN=offline      → `login status` reports network error
 # All modes also write "result-last.md" in cwd when succeeding.
 set -u
 MODE="${MOCK_CODEX_MODE:-ok}"
+LOGIN="${MOCK_CODEX_LOGIN:-ok}"
 STATE_FILE="${MOCK_STATE_FILE:-/tmp/mock_codex_state}"
 
 mkdir -p "$CODEX_HOME"
+
+# `codex login status` subcommand — used by the scheduler's account probe.
+if [ "${1:-}" = "login" ] && [ "${2:-}" = "status" ]; then
+  case "$LOGIN" in
+    ok)
+      echo "Logged in using an API key"
+      exit 0
+      ;;
+    dead)
+      echo "Error: 401 Unauthorized - invalid api key or account suspended" >&2
+      exit 1
+      ;;
+    offline)
+      echo "Error: network error - connection timed out reaching auth endpoint" >&2
+      exit 1
+      ;;
+    *)
+      echo "unknown MOCK_CODEX_LOGIN=$LOGIN" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 case "$MODE" in
   ok)

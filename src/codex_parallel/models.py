@@ -124,6 +124,24 @@ class WorkerRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PoolAlert(Base):
+    """Operational alert for the token pool — surfaced to CLI and web.
+
+    Written when the pool is exhausted while items wait; cleared manually
+    once new tokens are imported (or auto-cleared on next successful acquire).
+    """
+
+    __tablename__ = "pool_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message: Mapped[str] = mapped_column(Text)
+    hub_id: Mapped[str] = mapped_column(String(64), default="")
+    # active | resolved
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 def make_engine(db_url: str):
     return create_engine(db_url, connect_args={"timeout": 30})
 
