@@ -121,9 +121,27 @@ curl -X POST localhost:8787/api/tasks -H 'Content-Type: application/json' \
 | `scripts/validate_sandbox_dockerfile.sh` | 快照约束静态校验 |
 | `configs/sandbox_tool.json` | Agent Runtime Tool 注册配置 |
 
-## 网络注意
+## 网络注意（重要——实测结论 2026-10-12）
 
-沙箱内 codex 要出网访问 Codex API 端点。`configs/sandbox_tool.json`
-当前配的是 VPC 模式（subnet-ljfuh7ln / sg-irz5h5ed，沿用 agentic_cl_research
-的）。如果 VPC 内不通公网，把 `NetworkMode` 改成 `"PUBLIC"` 再重新
-`CreateSandboxTool`。
+**沙箱必须能出网访问 Codex API 端点。实测发现北京区域的沙箱出不去 OpenAI：**
+
+| 测试 | 结果 |
+|---|---|
+| VPC 模式（subnet-ljfuh7ln） | `api.openai.com` 超时（000） |
+| PUBLIC 模式（`NetworkMode: "PUBLIC"`，Tool `sdt-4j86lmyw`） | `api.openai.com` DNS 被污染（解析出 Facebook IPv6）+ 直连全部 IP 超时；`auth.openai.com` 返回 403（Cloudflare 区域拦截）；`status.openai.com` 反而可达 |
+
+结论：这是 GFW 对 OpenAI 域名的 DNS 污染 + IP 封锁 + Cloudflare 区域拦截，
+腾讯云北京出口绕不过去。**沙箱内 codex 会一直卡到超时**（不是账号问题，
+网络层就不通）。
+
+可选出路（按推荐排序）：
+
+1. **境外区域开沙箱**：Agent Runtime 如有新加坡/硅谷区域，Tool 用境外区域
+   创建，网络直连 OpenAI。改 `--region` + 重建 Tool 即可，镜像复用。
+2. **沙箱内走代理**：在 VPC 内自建一个能出境的 HTTP 代理（或买商业代理），
+   镜像里给 codex 注入 `HTTPS_PROXY`。hub 的 `codex_config.extra_args`
+   可以传 `-c network_proxy.url=...`，或者后端 create 时注入 env。
+3. **中转 API 端点**：如果 Codex 凭据支持自定义 base_url（自建网关反代
+   api.openai.com），改 codex 的 model_providers 配置指向网关。
+
+在这之前，`local` backend（本机/境外机器直跑）是唯一能真跑 codex 的路径。
