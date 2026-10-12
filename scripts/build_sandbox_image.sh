@@ -45,6 +45,10 @@ echo "[build] building ${FULL_TAG} (platform=linux/amd64)"
 echo "[build] base image: ${SANDBOX_BASE_IMAGE}"
 echo "[build] codex CLI : @openai/codex@${CODEX_VERSION}"
 
+# 从头构建开关：
+#   BUILD_NO_CACHE=1 → --no-cache + --pull（不用任何层缓存、强制拉新 base）。
+# bash 3.2 (macOS 自带) 下空数组 + set -u 会报 unbound variable，
+# 用 ${arr[@]+"${arr[@]}"} 展开习惯来兼容。
 _BUILD_ARGS=()
 if [[ "${BUILD_NO_CACHE:-0}" == "1" ]]; then
   _BUILD_ARGS+=(--no-cache --pull)
@@ -54,7 +58,7 @@ docker build \
   --platform linux/amd64 \
   --build-arg SANDBOX_BASE_IMAGE="${SANDBOX_BASE_IMAGE}" \
   --build-arg CODEX_VERSION="${CODEX_VERSION}" \
-  "${_BUILD_ARGS[@]}" \
+  ${_BUILD_ARGS[@]+"${_BUILD_ARGS[@]}"} \
   -t "${FULL_TAG}" \
   -f "${ROOT}/docker/sandbox/Dockerfile" \
   "${ROOT}/docker/sandbox/"
