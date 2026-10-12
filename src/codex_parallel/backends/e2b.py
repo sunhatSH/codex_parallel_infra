@@ -21,11 +21,28 @@ class E2BSandboxWrapper(Sandbox):
 
     async def run(self, cmd, *, timeout_s: int, env: dict[str, str] | None = None) -> ExecResult:
         shell = " ".join(shlex.quote(c) for c in cmd)
-        prefix = ""
+        # envd runs commands via sh -c; export prefix is the reliable way to
+        # inject per-run env (verified live against Tencent Agent Runtime).
         if env:
             exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-            prefix = f"export {exports} && "
-        loop_out = await asyncio_wrap(self._sb.commands.run, prefix + shell, timeout=timeout_s)
+            shell = f"export {exports} && {shell}"
+        try:
+            loop_out = await self._sb.commands.run(shell, timeout=timeout_s)
+        except Exception as e:  # noqa: BLE001
+            # TimeoutException → timeout; CommandExitException carries the
+            # result on it; anything else is an infra error.
+            msg = str(e)
+            if "timeout" in msg.lower() or "timed out" in msg.lower():
+                return ExecResult(-1, "", msg, True)
+            res = getattr(e, "result", None)
+            if res is not None and hasattr(res, "exit_code"):
+                return ExecResult(
+                    res.exit_code,
+                    (res.stdout or ""),
+                    (res.stderr or "") or msg,
+                    False,
+                )
+            raise
         return ExecResult(
             loop_out.exit_code,
             (loop_out.stdout or ""),
@@ -34,24 +51,21 @@ class E2BSandboxWrapper(Sandbox):
         )
 
     async def upload(self, local_path: str, remote_path: str) -> None:
-        await asyncio_wrap(self._sb.files.write, remote_path, open(local_path, "rb").read())
+        with open(local_path, "rb") as f:
+            await self._sb.files.write(remote_path, f.read())
 
     async def download(self, remote_path: str, local_path: str) -> None:
-        data = await asyncio_wrap(self._sb.files.read, remote_path)
+        data = await self._sb.files.read(remote_path)
+        if isinstance(data, str):
+            data = data.encode()
         with open(local_path, "wb") as f:
             f.write(data)
 
     async def kill(self) -> None:
         try:
-            await asyncio_wrap(self._sb.kill)
+            await self._sb.kill()
         except Exception:
             pass
-
-
-async def asyncio_wrap(fn, *args, **kwargs):
-    import asyncio
-
-    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
 @register_backend
@@ -65,15 +79,16 @@ class E2BBackend:
         self._timeout = timeout_s
 
     async def create(self) -> Sandbox:
-        from e2b_code_interpreter import Sandbox as E2BSandbox
+        from e2b import AsyncSandbox as E2BAsyncSandbox
 
         api_key = os.environ.get("E2B_API_KEY")
         domain = os.environ.get("E2B_DOMAIN")
         if not api_key or not domain:
             raise RuntimeError("E2B_API_KEY and E2B_DOMAIN must be set for e2b backend")
-        sb = await asyncio_wrap(
-            E2BSandbox.create, template=self._template, timeout=self._timeout
-        )
+        # AGS keys carry an ark_ prefix; the e2b SDK would reject it unless
+        # validation is disabled (same switch agentic_cl_research uses).
+        os.environ.setdefault("E2B_VALIDATE_API_KEY", "false")
+        sb = await E2BAsyncSandbox.create(template=self._template, timeout=self._timeout)
         return E2BSandboxWrapper(sb, self._timeout)
 
     async def close(self) -> None:

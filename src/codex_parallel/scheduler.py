@@ -61,6 +61,8 @@ class Scheduler:
             kwargs = {}
             if name == "local":
                 kwargs["workspace_root"] = self._cfg.workspace_root
+            elif name == "e2b":
+                kwargs["template"] = self._cfg.e2b_template
             self._backends[name] = make_backend(name, **kwargs)
         return self._backends[name]
 

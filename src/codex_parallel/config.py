@@ -24,7 +24,7 @@ class HubConfig:
     max_item_retries: int = 2
     sandbox_env_timeout_s: int = 600
     login_probe_timeout_s: int = 90
-    e2b_template: str = "agentic-cl-sandbox"
+    e2b_template: str = "codex-parallel-sandbox"
 
     @property
     def db_path(self) -> Path:
