@@ -28,6 +28,7 @@ class CodexRunResult:
     last_message: str = ""
     events: list[dict] = field(default_factory=list)
     error: str = ""
+    watchdog: str = ""  # raw /tmp/.watchdog/status JSON line from the sandbox
 
     @property
     def failure_kind(self) -> str:
@@ -158,9 +159,21 @@ class CodexRunner:
         full_env = dict(env or {})
         full_env.setdefault("CODEX_HOME", ".codex-home")
 
+        # In-sandbox watchdog (plain shell supervisor, not an agent): watches
+        # the codex PID and persists status to /tmp/.watchdog/status so the
+        # hub can learn the outcome even if the streaming connection dies
+        # (AGS gateway GOAWAY / network partition). Started per-run, best
+        # effort — a sandbox without the script simply runs without it.
+        wd = await self._start_watchdog(sandbox)
+
         res = await sandbox.run(
             self.build_argv(prompt), timeout_s=timeout_s, env=full_env
         )
+
+        # If the stream died mid-run, the watchdog file is the fallback
+        # source of truth for what happened to codex.
+        wd_status = await self._read_watchdog(sandbox, wd)
+
         events = self._parse_events(res.stdout)
         last_message = self._extract_last_message(events)
         combined = res.stderr + res.stdout
@@ -183,7 +196,48 @@ class CodexRunner:
             last_message=last_message,
             events=events,
             error=(res.stderr or res.stdout)[-4000:] if not res.ok else "",
+            watchdog=wd_status,
         )
+
+    async def _start_watchdog(self, sandbox) -> bool:
+        """Install + spawn the sandbox-side supervisor. Returns True if up."""
+        try:
+            script = Path(__file__).resolve().parents[2] / "docker" / "sandbox" / "watchdog.sh"
+            if not script.is_file():
+                return False
+            # figure out the codex PID: we launch codex via `sh -c "... & echo $!"`
+            # — simpler: the wrapper prints the pid, watchdog reads it. Here we
+            # start the watchdog pointed at the NEXT codex process by having it
+            # watch "the newest codex process". Shell-friendliest: pgrep -n.
+            await sandbox.run(
+                [
+                    "sh", "-c",
+                    "command -v pgrep >/dev/null || exit 0; "
+                    "nohup sh /opt/codex-parallel/watchdog.sh "
+                    "$(pgrep -n -f 'codex exec' || echo 0) >/dev/null 2>&1 & "
+                    "exit 0",
+                ],
+                timeout_s=15,
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _read_watchdog(self, sandbox, started: bool) -> str:
+        """Pull the watchdog status file; empty when unavailable."""
+        if not started:
+            return ""
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                tmp = f.name
+            await sandbox.download("/tmp/.watchdog/status", tmp)
+            content = Path(tmp).read_text().strip()
+            Path(tmp).unlink(missing_ok=True)
+            return content[-2000:]
+        except Exception:  # noqa: BLE001
+            return ""
 
     async def fetch_last_message(self, sandbox, remote_path: str = "result-last.md") -> str:
         import tempfile

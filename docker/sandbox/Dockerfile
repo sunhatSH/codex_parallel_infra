@@ -69,3 +69,11 @@ RUN pip install --no-cache-dir --break-system-packages \
 # 5. Smoke-check the binary landed and runs (fail the build early if not).
 RUN codex --version && codex exec --help >/dev/null 2>&1 || \
         (echo "codex exec not functional" >&2; exit 1)
+
+# 6. In-sandbox watchdog (plain shell supervisor, NOT an agent): watches the
+#    codex process and persists status to /tmp/.watchdog/status so the hub
+#    can recover the outcome even if the streaming connection is recycled
+#    by the AGS gateway (GOAWAY) or the network partitions mid-run.
+COPY watchdog.sh /opt/codex-parallel/watchdog.sh
+RUN chmod +x /opt/codex-parallel/watchdog.sh \
+    && sh -n /opt/codex-parallel/watchdog.sh

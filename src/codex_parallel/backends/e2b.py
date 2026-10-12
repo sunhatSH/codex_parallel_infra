@@ -11,6 +11,7 @@ import os
 import shlex
 from typing import Any
 
+from . import e2b_http1_patch  # noqa: F401 — flips SDK to HTTP/1.1 on import
 from .base import ExecResult, Sandbox, register_backend
 
 
