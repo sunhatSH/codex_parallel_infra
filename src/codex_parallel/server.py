@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -52,6 +53,17 @@ class TokenStatusIn(BaseModel):
 def create_app(cfg: HubConfig | None = None) -> FastAPI:
     cfg = cfg or load_config()
     cfg.ensure_dirs()
+
+    # 全局代理: hub 进程环境一次注入，所有子进程/库继承——
+    # codex 子进程（local backend）、RT 兑换（urllib 读 *_PROXY）、e2b SDK。
+    if cfg.proxy:
+        os.environ["HTTP_PROXY"] = cfg.proxy
+        os.environ["HTTPS_PROXY"] = cfg.proxy
+        os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1")
+    else:
+        os.environ.pop("HTTP_PROXY", None)
+        os.environ.pop("HTTPS_PROXY", None)
+
     session_factory = bootstrap(cfg.db_path)
     token_pool = TokenPool(session_factory, cfg.secrets_dir)
 

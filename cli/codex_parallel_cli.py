@@ -207,31 +207,45 @@ def token_enable(
 
 @task_app.command("submit")
 def task_submit(
-    name: str = typer.Option(..., "--name"),
-    prompt_template: str = typer.Option(..., "--prompt", help="must contain {{item}}"),
-    items_file: Path = typer.Option(..., "--items", help="one item per line"),
+    ctx: typer.Context,
+    items_file: Path = typer.Argument(..., help="文件，每行一个 item"),
+    name: str = typer.Option(None, "--name", help="任务名，默认 items 文件名"),
+    prompt: str = typer.Option(
+        "过滤以下训练数据并给出质量分(1-10)，只输出JSON: {{item}}",
+        "--prompt", "-p",
+        help="prompt 模板，必须含 {{item}}",
+    ),
     concurrency: int = typer.Option(8, "--concurrency", "-c"),
-    backend: str = typer.Option("local", "--backend"),
-    model: str = typer.Option(None, "--model"),
+    backend: str = typer.Option(None, "--backend", help="local | e2b，缺省用 hub 默认"),
+    model: str = typer.Option(None, "--model", "-m"),
     base: str = typer.Option(DEFAULT_URL, "--url"),
 ) -> None:
+    """提交任务。最简: codex-parallel task submit data.txt"""
+    name = name or items_file.stem
+    body = {
+        "name": name,
+        "prompt_template": prompt,
+        "items_file": str(items_file),
+        "concurrency": concurrency,
+    }
+    if backend:
+        body["backend"] = backend
+    codex_config = {}
+    if model:
+        codex_config["model"] = model
+    body["codex_config"] = codex_config
     with _client(base) as c:
-        codex_config = {}
-        if model:
-            codex_config["model"] = model
-        r = c.post(
-            "/api/tasks",
-            json={
-                "name": name,
-                "prompt_template": prompt_template,
-                "items_file": str(items_file),
-                "concurrency": concurrency,
-                "backend": backend,
-                "codex_config": codex_config,
-            },
-        )
-        r.raise_for_status()
-        _print(r.json(), False)
+        r = c.post("/api/tasks", json=body)
+        if r.status_code >= 400:
+            detail = r.json().get("detail", r.text)
+            typer.secho(f"提交失败: {detail}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        d = r.json()
+    typer.secho(
+        f"任务 #{d['task_id']} 已提交 ({d['num_items']} items, 并发 {concurrency})",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"查看: codex-parallel task show {d['task_id']}")
 
 
 @task_app.command("list")
