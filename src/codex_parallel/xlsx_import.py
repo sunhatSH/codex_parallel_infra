@@ -70,14 +70,26 @@ def import_xlsx_to_pool(pool, xlsx_path: str | Path, *, exchange: bool = True) -
             tok = pool.add_token(label, secret, max_concurrency=1)
             added.append(tok.label)
         except TokenExchangeError as e:
-            # exchange failed (likely no network path) but we still have a
-            # refresh_token — store it as RT-only secret; codex/runner can
-            # retry the exchange when a proxy is configured.
-            if tb.refresh_token:
+            # exchange failed — but the exchange cache may still hold a usable
+            # auth.json from a PREVIOUS import of the same RT (re-exchanging
+            # the same RT would burn it with refresh_token_reused).
+            from .token_exchange import get_exchange_cache
+
+            cached = get_exchange_cache().lookup_usable(tb.refresh_token)
+            if cached is not None:
                 try:
                     pool.add_token(
-                        f"{label}", tb.refresh_token, max_concurrency=1
+                        label, json.dumps(cached, ensure_ascii=False), max_concurrency=1
                     )
+                    added.append(label)
+                    continue
+                except ValueError:
+                    pass
+            # still nothing: store the bare RT; the runner retries the
+            # exchange when a proxy is configured.
+            if tb.refresh_token:
+                try:
+                    pool.add_token(f"{label}", tb.refresh_token, max_concurrency=1)
                     added.append(label)
                     continue
                 except ValueError:

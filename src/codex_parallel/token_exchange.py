@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib import error, parse, request
 
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -30,8 +32,16 @@ class TokenExchangeError(Exception):
 
 
 def decode_jwt(token: str) -> dict:
-    payload = token.split(".")[1]
-    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    parts = token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    if not payload:
+        return {}
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, json.JSONDecodeError):
+        return {}
 
 
 def _auth_json_from_response(result: dict, fallback_rt: str) -> dict:
@@ -62,7 +72,27 @@ def _auth_json_from_response(result: dict, fallback_rt: str) -> dict:
 
 
 def exchange_refresh_token(refresh_token: str, *, timeout_s: int = 120) -> dict:
-    """Bare RT → auth.json (network call to auth.openai.com)."""
+    """Bare RT → auth.json (network call to auth.openai.com).
+
+    Checks the exchange cache first: if this exact RT was exchanged before,
+    the cached (rotated) auth.json is returned — re-exchanging would burn
+    the rotation with refresh_token_reused.
+    """
+    cache = get_exchange_cache()
+    cached = cache.get(refresh_token)
+    if cached is not None:
+        # We hold a cached exchange for this RT. If its AT is still fresh,
+        # reuse it directly; otherwise re-exchange using the STORED
+        # (rotated) RT — never the original, which is already spent.
+        usable = cache.lookup_usable(refresh_token)
+        if usable is not None:
+            return usable
+        rotated_rt = cached.get("tokens", {}).get("refresh_token") or refresh_token
+        return _exchange_via_network(rotated_rt, timeout_s, cache_key=refresh_token)
+    return _exchange_via_network(refresh_token, timeout_s, cache_key=refresh_token)
+
+
+def _exchange_via_network(refresh_token: str, timeout_s: int, *, cache_key: str) -> dict:
     data = parse.urlencode(
         {
             "grant_type": "refresh_token",
@@ -88,7 +118,75 @@ def exchange_refresh_token(refresh_token: str, *, timeout_s: int = 120) -> dict:
         raise TokenExchangeError(f"HTTP {e.code} from auth endpoint") from e
     except (error.URLError, TimeoutError, OSError) as e:
         raise TokenExchangeError(f"network error: {e}") from e
-    return _auth_json_from_response(result, refresh_token)
+    auth_json = _auth_json_from_response(result, refresh_token)
+    get_exchange_cache().put(cache_key, auth_json)
+    return auth_json
+
+
+@dataclass
+class _ExchangeCache:
+    """RT → auth.json disk cache (data/rt_cache/).
+
+    Refresh tokens are single-use against the auth endpoint: re-exchanging
+    the SAME rt a second time returns refresh_token_reused. So every
+    successful exchange is persisted keyed by the rt that produced it;
+    re-importing the same rt later reuses the stored auth.json instead of
+    burning it. Entries whose stored AT has expired are refreshed lazily
+    via the STORED (rotated) rt, never the original one.
+    """
+
+    def __init__(self, root: Path):
+        self._dir = root
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, rt: str) -> Path:
+        import hashlib
+
+        return self._dir / (hashlib.sha256(rt.encode()).hexdigest()[:24] + ".json")
+
+    def get(self, rt: str) -> dict | None:
+        p = self._path(rt)
+        if not p.is_file():
+            return None
+        try:
+            d = json.loads(p.read_text())
+            if d.get("tokens", {}).get("refresh_token"):
+                return d
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def put(self, rt: str, auth_json: dict) -> None:
+        self._path(rt).write_text(json.dumps(auth_json, ensure_ascii=False))
+
+    def lookup_usable(self, rt: str) -> dict | None:
+        """Cached auth.json whose AT is still fresh (no network needed)."""
+        d = self.get(rt)
+        if d is None:
+            return None
+        at = d.get("tokens", {}).get("access_token")
+        if not at:
+            return None
+        try:
+            claims = decode_jwt(at)
+            if datetime.now(timezone.utc).timestamp() < claims.get("exp", 0) - 300:
+                return d
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+_CACHE: _ExchangeCache | None = None
+
+
+def get_exchange_cache(root: str | Path | None = None) -> _ExchangeCache:
+    """Process-wide cache. Root defaults to CODEX_PARALLEL_HOME/rt_cache."""
+    global _CACHE
+    if _CACHE is None:
+        if root is None:
+            root = os.environ.get("CODEX_PARALLEL_HOME") or Path.cwd()
+        _CACHE = _ExchangeCache(Path(root) / "rt_cache")
+    return _CACHE
 
 
 @dataclass
