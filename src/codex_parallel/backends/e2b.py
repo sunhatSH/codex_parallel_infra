@@ -52,6 +52,10 @@ class E2BSandboxWrapper(Sandbox):
         )
 
     async def upload(self, local_path: str, remote_path: str) -> None:
+        # ensure parent dirs exist for nested relative paths
+        parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else None
+        if parent:
+            await self._sb.commands.run(f"mkdir -p {shlex.quote(parent)}", timeout=15)
         with open(local_path, "rb") as f:
             await self._sb.files.write(remote_path, f.read())
 

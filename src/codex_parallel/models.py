@@ -77,6 +77,8 @@ class Task(Base):
     backend: Mapped[str] = mapped_column(String(32), default="local")
     concurrency: Mapped[int] = mapped_column(Integer, default=8)
     codex_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # hub-local file/dir paths copied into every sandbox workspace pre-run
+    input_files: Mapped[list] = mapped_column(JSON, default=list)
     hub_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

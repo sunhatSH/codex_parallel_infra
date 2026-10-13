@@ -218,15 +218,22 @@ def task_submit(
     concurrency: int = typer.Option(8, "--concurrency", "-c"),
     backend: str = typer.Option(None, "--backend", help="local | e2b，缺省用 hub 默认"),
     model: str = typer.Option(None, "--model", "-m"),
+    input_files: list[Path] = typer.Option(
+        [], "--file", "-f",
+        help="随任务传入沙箱的文件/目录（可多次）；模型在其 cwd 里直接看到",
+    ),
     base: str = typer.Option(DEFAULT_URL, "--url"),
 ) -> None:
-    """提交任务。最简: codex-parallel task submit data.txt"""
+    """提交任务。最简: codex-parallel task submit data.txt
+    带文件: codex-parallel task submit data.txt -f doc.pdf -f data_dir/
+    """
     name = name or items_file.stem
     body = {
         "name": name,
         "prompt_template": prompt,
-        "items_file": str(items_file),
+        "items_file": str(items_file.resolve()),
         "concurrency": concurrency,
+        "input_files": [str(p.expanduser().resolve()) for p in input_files],
     }
     if backend:
         body["backend"] = backend

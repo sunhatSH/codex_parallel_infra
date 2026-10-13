@@ -243,19 +243,21 @@ class Scheduler:
             concurrency = task.concurrency if task else 1
             backend_name = task.backend if task else "local"
             codex_config = dict(task.codex_config) if task else {}
+            input_files = list(task.input_files or []) if task else []
         loop_task = asyncio.create_task(
-            self._task_loop(task_id, concurrency, backend_name, codex_config),
+            self._task_loop(task_id, concurrency, backend_name, codex_config, input_files),
             name=f"task-{task_id}",
         )
         self._loops[task_id] = loop_task
 
     async def _task_loop(
-        self, task_id: int, concurrency: int, backend_name: str, codex_config: dict
+        self, task_id: int, concurrency: int, backend_name: str, codex_config: dict,
+        input_files: list | None = None,
     ) -> None:
         log.info("task %s: starting %d workers, backend=%s", task_id, concurrency, backend_name)
         workers = [
             asyncio.create_task(
-                self._worker_loop(task_id, slot, backend_name, codex_config),
+                self._worker_loop(task_id, slot, backend_name, codex_config, input_files),
                 name=f"task-{task_id}-w{slot}",
             )
             for slot in range(concurrency)
@@ -318,7 +320,8 @@ class Scheduler:
             return s.execute(q).scalar() or 0
 
     async def _worker_loop(
-        self, task_id: int, slot: int, backend_name: str, codex_config: dict
+        self, task_id: int, slot: int, backend_name: str, codex_config: dict,
+        input_files: list | None = None,
     ) -> None:
         runner = CodexRunner(
             codex_bin=codex_config.get("codex_bin", "codex"),
@@ -341,12 +344,13 @@ class Scheduler:
                     return
                 await asyncio.sleep(WORKER_POLL_S)
                 continue
-            await self._process_item(item, slot, backend_name, runner)
+            await self._process_item(item, slot, backend_name, runner, input_files)
             # yield so the task-loop supervisor gets a chance to observe state
             await asyncio.sleep(0)
 
     async def _process_item(
-        self, item: TaskItem, slot: int, backend_name: str, runner: CodexRunner
+        self, item: TaskItem, slot: int, backend_name: str, runner: CodexRunner,
+        input_files: list | None = None,
     ) -> None:
         """One item through the checkpointed sandbox-lifecycle policy.
 
@@ -404,6 +408,10 @@ class Scheduler:
                     )
                     s.commit()
                 secret = self._tokens.read_secret(token.id)
+
+                # ── stage task input files into the sandbox workspace (the
+                # model's cwd) so prompts can reference them by name.
+                await self._stage_input_files(sandbox, input_files)
 
                 # ── checkpoint: account login probe (fresh sandbox, this token)
                 probe = await self._login_probe(sandbox, secret)
@@ -548,6 +556,29 @@ class Scheduler:
             await self.health.beat(run_id)
 
     # ── login probe ──────────────────────────────────────────────────── #
+
+    async def _stage_input_files(self, sandbox, input_files: list | None) -> None:
+        """Copy hub-local files/dirs into the sandbox workspace (model cwd).
+
+        Directories are walked; every file lands at its relative path.
+        Failures raise — a missing input file is a task-definition error,
+        not something to retry with another account.
+        """
+        if not input_files:
+            return
+        import shutil
+
+        for f in input_files:
+            src = Path(f).expanduser()
+            if not src.exists():
+                raise FileNotFoundError(f"input_file not found: {f}")
+            if src.is_file():
+                await sandbox.upload(str(src), src.name)
+            else:
+                for p in sorted(src.rglob("*")):
+                    if p.is_file():
+                        rel = p.relative_to(src)
+                        await sandbox.upload(str(p), str(rel))
 
     def _check_usage_floor(self, token, res: CodexRunResult) -> None:
         """After a completed task, check the account's usage windows.

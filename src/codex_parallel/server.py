@@ -29,6 +29,9 @@ class TaskIn(BaseModel):
     prompt_template: str
     items: list[str] = Field(default_factory=list)
     items_file: str | None = None
+    # files/dirs on the HUB machine copied into every sandbox's workspace
+    # before codex runs. The model sees them in its cwd.
+    input_files: list[str] = Field(default_factory=list)
     concurrency: int = 8
     backend: str = "local"
     codex_config: dict = Field(default_factory=dict)
@@ -116,6 +119,13 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
             raise HTTPException(400, "no items: provide items or items_file")
         if "{{item}}" not in t.prompt_template:
             raise HTTPException(400, "prompt_template must contain {{item}}")
+        # validate input files up front (fail fast, before any sandbox spins)
+        from pathlib import Path as _P
+
+        for f in t.input_files:
+            p = _P(f).expanduser()
+            if not p.exists():
+                raise HTTPException(400, f"input_file not found: {f}")
         with session_factory() as s:
             task = Task(
                 name=t.name,
@@ -123,6 +133,7 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
                 backend=t.backend,
                 concurrency=t.concurrency,
                 codex_config=t.codex_config,
+                input_files=list(t.input_files),
             )
             s.add(task)
             s.flush()
