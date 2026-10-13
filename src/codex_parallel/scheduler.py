@@ -454,6 +454,10 @@ class Scheduler:
                 self._capture_rotated_rt(token, res)
 
                 if res.ok:
+                    # ── post-task usage check: if the tightest window is
+                    # below 1/50 remaining, park the token proactively
+                    # (same cooldown path as an explicit 429).
+                    self._check_usage_floor(token, res)
                     result_path = self._persist_result(task_id, item_id, last_msg, res, token)
                     self._complete_item(item_id, result_path, res)
                     # token proved healthy — clear its accumulated strikes
@@ -544,6 +548,54 @@ class Scheduler:
             await self.health.beat(run_id)
 
     # ── login probe ──────────────────────────────────────────────────── #
+
+    def _check_usage_floor(self, token, res: CodexRunResult) -> None:
+        """After a completed task, check the account's usage windows.
+
+        If the tightest window has < 1/50 (2%) remaining, park the token
+        for that window via the same report_quota_exhausted path as an
+        explicit 429. Runs best-effort: probe failures are logged and
+        ignored (never fails the item).
+        """
+        try:
+            from .usage_probe import probe_usage
+
+            auth = self._parse_auth(res.refreshed_auth) or self._parse_auth(
+                self._tokens.read_secret(token.id)
+            )
+            if not auth:
+                return
+            at = auth.get("access_token")
+            acc = auth.get("account_id")
+            if not at or not acc:
+                return
+            usage = probe_usage(at, acc, proxy=self._cfg.proxy)
+            hit = usage.floor_hit()
+            if hit:
+                self._tokens.report_quota_exhausted(token.id, hit)
+                log.info(
+                    "token %s: usage floor hit (%s window <2%%), cooling down",
+                    token.label, hit,
+                )
+            else:
+                log.debug("token %s usage ok: %s", token.label, usage.windows)
+        except Exception as e:  # noqa: BLE001
+            log.warning("token %s: usage probe failed: %s", token.label, e)
+
+    @staticmethod
+    def _parse_auth(secret_or_json: str) -> dict | None:
+        import json as _json
+
+        if not secret_or_json:
+            return None
+        s = secret_or_json.strip()
+        if not s.startswith("{"):
+            return None
+        try:
+            d = _json.loads(s)
+        except _json.JSONDecodeError:
+            return None
+        return d.get("tokens") if isinstance(d, dict) else None
 
     def _capture_rotated_rt(self, token, res: CodexRunResult) -> None:
         """Persist a rotated auth.json from the sandbox back into the pool.
