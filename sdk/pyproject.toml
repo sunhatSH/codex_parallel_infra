@@ -1,0 +1,14 @@
+[project]
+name = "codex-parallel-sdk"
+version = "0.1.0"
+description = "Python SDK for the codex-parallel hub (submit tasks, manage the account pool, collect results)"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["codex_parallel_sdk*"]
