@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,7 @@ task_app = typer.Typer(no_args_is_help=True, help="task management")
 app.add_typer(token_app, name="token")
 app.add_typer(task_app, name="task")
 
-DEFAULT_URL = "http://127.0.0.1:8787"
+DEFAULT_URL = os.environ.get("CODEX_PARALLEL_URL", "http://127.0.0.1:8787")
 
 
 def _url(base: str) -> str:

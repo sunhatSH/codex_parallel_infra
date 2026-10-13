@@ -37,21 +37,27 @@ curl -X POST localhost:8787/api/tasks -H 'Content-Type: application/json' \
 
 ## CLI
 
+完整手册见 **`docs/CLI.md`**（含所有命令、参数、状态语义、典型工作流、故障排查，
+随 CLI 变更同步更新）。速览：
+
 ```bash
-codex-parallel status
+codex-parallel status                                    # 总览 + 告警
+codex-parallel token import-xlsx 10个gpt.xlsx            # 导入账户表
 codex-parallel token list / add / add-bulk / disable / enable
 codex-parallel task submit --name x --prompt '...{{item}}' --items items.txt -c 64
 codex-parallel task list / show / stop / cancel / results
+codex-parallel alerts [--resolve N]
 ```
 
 ## 失败归因策略 (attribution.py)
 
 | 归因 | token 处理 | item 处理 |
 |---|---|---|
-| 账号失效 (401/403/...) | 标记 banned, 立即换新 token | 继续 |
-| 瞬时失败 (429/503/网络) | 原token重试, strike+1 | 继续 |
+| 账号失效 (401/403/...) | 标记 banned（永久）, 立即换新 token | 继续 |
+| 5h/周/月用量满 | 对应时长冷却，到期自动回来 | 换号继续 |
+| 瞬时失败 (503/网络) | 原token重试, strike+1 | 继续 |
 | 3 次重试耗尽 | 丢弃该 token, 换新 | 继续 |
-| 池子空 | — | item 失败 |
+| 池子空/全在冷却 | — | item 失败 + CLI/Web 告警 |
 
 ## 检查点 / 沙箱重启
 
