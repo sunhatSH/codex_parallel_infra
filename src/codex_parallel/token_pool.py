@@ -93,6 +93,26 @@ class TokenPool:
                 raise KeyError(f"no token id={token_id}")
             return Path(tok.secret_path).read_text()
 
+    def update_secret(self, token_id: int, secret: str) -> bool:
+        """Persist a rotated secret (e.g. a newer refresh token).
+
+        Critical for chatgpt-mode accounts: the RT rotates on exchange and
+        the old one can become single-use. Losing the newest RT = manual
+        browser login to recover. Only rewrites when the content actually
+        changed. Returns True if updated.
+        """
+        with self._session() as s:
+            tok = s.get(Token, token_id)
+            if tok is None:
+                return False
+            path = Path(tok.secret_path)
+            old = path.read_text() if path.is_file() else ""
+            if old == secret:
+                return False
+            path.write_text(secret)
+            path.chmod(0o600)
+            return True
+
     # ── allocation ───────────────────────────────────────────────────── #
 
     def acquire(self) -> Token:

@@ -29,6 +29,7 @@ class CodexRunResult:
     events: list[dict] = field(default_factory=list)
     error: str = ""
     watchdog: str = ""  # raw /tmp/.watchdog/status JSON line from the sandbox
+    refreshed_auth: str = ""  # auth.json content read back after the run (RT rotation)
 
     @property
     def failure_kind(self) -> str:
@@ -116,8 +117,12 @@ class CodexRunner:
     async def prepare_auth(self, sandbox, token_secret: str) -> dict[str, str]:
         """Write auth.json into the sandbox's CODEX_HOME; return the env overlay.
 
-        token_secret is either raw JSON (an auth.json body) or a bare API key;
-        we normalize both into a valid auth.json payload.
+        Accepts three secret shapes:
+          - full auth.json JSON (auth_mode/tokens) → used verbatim (chatgpt)
+          - JSON with OPENAI_API_KEY → used verbatim (apikey)
+          - bare API key            → wrapped as apikey auth.json
+          - bare refresh token ("rt.") → wrapped as a minimal chatgpt-mode
+            auth.json; codex will exchange/refresh it on first contact
         """
         secret = token_secret.strip()
         if secret.startswith("{"):
@@ -129,6 +134,15 @@ class CodexRunner:
                     payload = json.dumps({"OPENAI_API_KEY": secret})
             except json.JSONDecodeError:
                 payload = json.dumps({"OPENAI_API_KEY": secret})
+        elif secret.startswith("rt.") or secret.count(".") >= 2:
+            # bare refresh token → chatgpt-mode skeleton; codex fills the rest
+            payload = json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "OPENAI_API_KEY": None,
+                    "tokens": {"refresh_token": secret},
+                }
+            )
         else:
             payload = json.dumps({"OPENAI_API_KEY": secret})
 
@@ -174,6 +188,12 @@ class CodexRunner:
         # source of truth for what happened to codex.
         wd_status = await self._read_watchdog(sandbox, wd)
 
+        # RT rotation capture: codex refreshes tokens in its in-sandbox
+        # CODEX_HOME during the run. Read the refreshed auth.json back so
+        # the pool never loses the newest refresh token (losing it means a
+        # manual browser login to recover the account).
+        refreshed_auth = await self._read_refreshed_auth(sandbox)
+
         events = self._parse_events(res.stdout)
         last_message = self._extract_last_message(events)
         combined = res.stderr + res.stdout
@@ -197,6 +217,7 @@ class CodexRunner:
             events=events,
             error=(res.stderr or res.stdout)[-4000:] if not res.ok else "",
             watchdog=wd_status,
+            refreshed_auth=refreshed_auth,
         )
 
     async def _start_watchdog(self, sandbox) -> bool:
@@ -236,6 +257,25 @@ class CodexRunner:
             content = Path(tmp).read_text().strip()
             Path(tmp).unlink(missing_ok=True)
             return content[-2000:]
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _read_refreshed_auth(self, sandbox) -> str:
+        """Read the sandbox's post-run auth.json (codex may have refreshed
+        the tokens inside its CODEX_HOME). Empty on any failure — the pool
+        keeps the previous secret then."""
+        try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                tmp = f.name
+            await sandbox.download(".codex-home/auth.json", tmp)
+            content = Path(tmp).read_text().strip()
+            Path(tmp).unlink(missing_ok=True)
+            # sanity: must be a JSON object with tokens to be worth persisting
+            if content.startswith("{") and '"tokens"' in content:
+                return content
+            return ""
         except Exception:  # noqa: BLE001
             return ""
 

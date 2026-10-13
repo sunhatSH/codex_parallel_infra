@@ -153,6 +153,33 @@ def token_add_bulk(
         _print(r.json(), False)
 
 
+@token_app.command("import-xlsx")
+def token_import_xlsx(
+    file: Path = typer.Argument(..., help="xlsx on the HUB machine (10个gpt.xlsx layout)"),
+    exchange: bool = typer.Option(
+        True, "--exchange/--no-exchange",
+        help="RT→auth.json exchange for expired tokens (needs network to auth.openai.com)",
+    ),
+    base: str = typer.Option(DEFAULT_URL, "--url"),
+) -> None:
+    """Import provider xlsx accounts (col A label, col P token bundle)."""
+    with _client(base) as c:
+        r = c.post(
+            "/api/tokens/import-xlsx",
+            json={"path": str(file.resolve()), "exchange": exchange},
+        )
+        r.raise_for_status()
+        d = r.json()
+    print(f"added:   {len(d['added'])}")
+    for label in d["added"]:
+        print(f"  + {label}")
+    if d["skipped"]:
+        print(f"skipped: {len(d['skipped'])}")
+        for label, why in d["skipped"]:
+            print(f"  - {label}: {why}")
+    print(f"pool:    {d['stats']}")
+
+
 @token_app.command("disable")
 def token_disable(
     token_id: int = typer.Argument(...),

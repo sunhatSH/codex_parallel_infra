@@ -7,7 +7,9 @@ in prod serve web-react/dist from any static host pointing at this API.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -231,6 +233,26 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"ok": True}
+
+    @app.post("/api/tokens/import-xlsx")
+    async def import_xlsx(body: dict):
+        """Import accounts from a provider xlsx on the HUB machine.
+
+        {"path": "/abs/path/to.xlsx", "exchange": true}
+        Each row's token bundle becomes one account token (auth.json secret).
+        RT exchange is attempted only for expired/missing access tokens.
+        """
+        path = body.get("path", "")
+        if not path:
+            raise HTTPException(400, "path required (file must be on the hub machine)")
+        if not Path(path).expanduser().is_file():
+            raise HTTPException(400, f"file not found: {path}")
+        from .xlsx_import import import_xlsx_to_pool
+
+        result = await asyncio.to_thread(
+            import_xlsx_to_pool, token_pool, path, exchange=body.get("exchange", True)
+        )
+        return result
 
     @app.get("/", include_in_schema=False)
     async def index():

@@ -446,6 +446,13 @@ class Scheduler:
                     await asyncio.gather(hb, return_exceptions=True)
                 last_msg = res.last_message or await runner.fetch_last_message(sandbox)
 
+                # ── RT rotation capture: persist the freshest refresh token
+                # BEFORE any outcome handling. If codex rotated tokens in the
+                # sandbox we must bank the new RT immediately — losing it
+                # means a manual browser login to recover the account, even
+                # when this very run is about to fail/retry.
+                self._capture_rotated_rt(token, res)
+
                 if res.ok:
                     result_path = self._persist_result(task_id, item_id, last_msg, res, token)
                     self._complete_item(item_id, result_path, res)
@@ -529,6 +536,29 @@ class Scheduler:
             await self.health.beat(run_id)
 
     # ── login probe ──────────────────────────────────────────────────── #
+
+    def _capture_rotated_rt(self, token, res: CodexRunResult) -> None:
+        """Persist a rotated auth.json from the sandbox back into the pool.
+
+        ChatGPT-mode refresh tokens rotate on exchange and may be single-use;
+        the pool must always hold the newest one. Called after every run
+        (success or failure) — codex may have refreshed mid-run either way.
+        """
+        if token is None or not getattr(res, "refreshed_auth", ""):
+            return
+        try:
+            from .rt_rotation import extract_refresh_token
+
+            old_secret = self._tokens.read_secret(token.id)
+            old_rt = extract_refresh_token(old_secret)
+            new_rt = extract_refresh_token(res.refreshed_auth)
+            if new_rt and new_rt != old_rt:
+                self._tokens.update_secret(token.id, res.refreshed_auth)
+                log.info(
+                    "token %s: refresh token ROTATED (banked new RT)", token.label
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("token %s: failed to bank rotated RT", token.label)
 
     async def _login_probe(self, sandbox, secret: str):
         """Verify the account credential inside this sandbox before the task.
