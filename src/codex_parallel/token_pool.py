@@ -153,8 +153,37 @@ class TokenPool:
 
     # ── health transitions ───────────────────────────────────────────── #
 
+    # Usage-window cooldowns: account is FINE but out of quota for a window.
+    QUOTA_WINDOW_COOLDOWN_S = {
+        "5h": 5 * 3600,
+        "weekly": 7 * 24 * 3600,
+        "monthly": 30 * 24 * 3600,
+    }
+
+    def report_quota_exhausted(self, token_id: int, window: str) -> None:
+        """Usage limit hit — park the token for the window's duration.
+
+        window: "5h" | "weekly" | "monthly". The token stays status=active
+        but cooldown_until blocks acquisition; quota_window records which
+        limit tripped (CLI/web display). Token is NOT banned: it comes back
+        automatically when the window rolls over.
+        """
+        secs = self.QUOTA_WINDOW_COOLDOWN_S.get(window)
+        if secs is None:
+            raise ValueError(f"unknown quota window: {window!r}")
+        with self._session() as s:
+            s.execute(
+                update(Token)
+                .where(Token.id == token_id)
+                .values(
+                    quota_window=window,
+                    quota_exhausted_at=utcnow(),
+                    cooldown_until=utcnow() + dt_secs(secs),
+                )
+            )
+
     def report_banned(self, token_id: int, reason: str = "") -> None:
-        """Account dead (auth/401/403) — retire the token permanently."""
+        """Account dead (auth/401/403/suspended) — retire the token permanently."""
         with self._session() as s:
             s.execute(
                 update(Token)

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .config import HubConfig, load_config
 from .db import bootstrap
-from .models import Task, TaskItem, utcnow
+from .models import Task, TaskItem, Token, utcnow
 from .scheduler import Scheduler
 from .token_pool import TokenPool
 
@@ -234,6 +234,22 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
             raise HTTPException(400, str(e))
         return {"ok": True}
 
+    @app.post("/api/tokens/{token_id}/concurrency")
+    async def set_token_concurrency(token_id: int, body: dict):
+        """Account utilization: how many sandboxes may use this auth.json
+        simultaneously. Default 1 (one account, one sandbox)."""
+        from sqlalchemy import update
+
+        n = body.get("max_concurrency")
+        if not isinstance(n, int) or n < 1:
+            raise HTTPException(400, "max_concurrency must be int >= 1")
+        with session_factory() as s:
+            s.execute(
+                update(Token).where(Token.id == token_id).values(max_concurrency=n)
+            )
+            s.commit()
+        return {"ok": True, "max_concurrency": n}
+
     @app.post("/api/tokens/import-xlsx")
     async def import_xlsx(body: dict):
         """Import accounts from a provider xlsx.
@@ -334,6 +350,15 @@ def create_app(cfg: HubConfig | None = None) -> FastAPI:
 
 
 def serialize_token(t) -> dict:
+    import datetime as dt
+
+    cooldown_left = None
+    if t.cooldown_until is not None:
+        cu = t.cooldown_until
+        if cu.tzinfo is None:
+            cu = cu.replace(tzinfo=dt.timezone.utc)
+        left = (cu - dt.datetime.now(dt.timezone.utc)).total_seconds()
+        cooldown_left = max(0, round(left))
     return {
         "id": t.id,
         "label": t.label,
@@ -342,6 +367,9 @@ def serialize_token(t) -> dict:
         "in_use": t.in_use,
         "max_concurrency": t.max_concurrency,
         "fail_count": t.fail_count,
+        "quota_window": t.quota_window,
+        "cooldown_until": iso(t.cooldown_until),
+        "cooldown_s_left": cooldown_left,
         "last_used_at": iso(t.last_used_at),
         "banned_reason": t.banned_reason,
         "created_at": iso(t.created_at),

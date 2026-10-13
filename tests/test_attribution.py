@@ -58,11 +58,12 @@ class TestMarkerClassification:
         assert CodexRunner._account_dead("HTTP 403 Forbidden")
         assert CodexRunner._account_dead("account suspended by provider")
 
-    def test_429_is_transient_not_dead(self):
+    def test_429_is_quota_not_dead_or_transient(self):
         from codex_parallel.codex_runner import CodexRunner
 
         assert not CodexRunner._account_dead("429 Too Many Requests")
-        assert CodexRunner._transient("429 Too Many Requests")
+        # 429 now maps to the 5h quota window (usage exhausted), not transient
+        assert CodexRunner._quota_window("429 Too Many Requests") == "5h"
         assert CodexRunner._transient("connection reset by peer")
         assert not CodexRunner._transient("some random parse error")
 

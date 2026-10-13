@@ -83,6 +83,37 @@ export default function TokensView({ toast }) {
     }
   }
 
+  function fmtCooldown(secs) {
+    if (secs <= 0) return ''
+    const h = Math.floor(secs / 3600)
+    const m = Math.floor((secs % 3600) / 60)
+    if (h >= 24) return `${Math.floor(h / 24)}d${h % 24}h`
+    return h > 0 ? `${h}h${m}m` : `${m}m`
+  }
+
+  async function setConcurrency(id, current) {
+    const v = window.prompt(
+      '利用率：这个账户的 auth.json 同时放入多少个沙箱？（默认 1；>1 同账户多沙箱并发，注意 RT 轮转互踢风险）',
+      current,
+    )
+    if (v === null) return
+    const n = parseInt(v, 10)
+    if (!Number.isInteger(n) || n < 1) {
+      toast('需要 ≥1 的整数')
+      return
+    }
+    try {
+      await api(`/api/tokens/${id}/concurrency`, {
+        method: 'POST',
+        body: JSON.stringify({ max_concurrency: n }),
+      })
+      toast(`已设为 ${n}`)
+      refresh()
+    } catch (e) {
+      toast(e.message)
+    }
+  }
+
   return (
     <>
       <form className="toolbar" onSubmit={uploadXlsx}>
@@ -102,12 +133,12 @@ export default function TokensView({ toast }) {
         <thead>
           <tr>
             <th>ID</th><th>标签</th><th>指纹</th><th>状态</th><th>并发</th>
-            <th>失败次数</th><th>失效原因</th><th></th>
+            <th>失败次数</th><th>冷却</th><th>失效原因</th><th></th>
           </tr>
         </thead>
         <tbody>
           {tokens.length === 0 && (
-            <tr><td colSpan={8} className="muted">token 池为空</td></tr>
+            <tr><td colSpan={9} className="muted">token 池为空</td></tr>
           )}
           {tokens.map((t) => (
             <tr key={t.id}>
@@ -115,8 +146,22 @@ export default function TokensView({ toast }) {
               <td>{t.label}</td>
               <td className="fp">{t.fingerprint}</td>
               <td><Badge value={t.status} /></td>
-              <td>{t.in_use}/{t.max_concurrency}</td>
+              <td>
+                {t.in_use}/{t.max_concurrency}{' '}
+                <button
+                  className="mini"
+                  title="利用率：一个账户的 auth.json 同时放入多少个沙箱（默认 1）"
+                  onClick={() => setConcurrency(t.id, t.max_concurrency)}
+                >
+                  改
+                </button>
+              </td>
               <td>{t.fail_count}</td>
+              <td className="muted">
+                {t.cooldown_s_left != null
+                  ? `${t.quota_window || ''} ${fmtCooldown(t.cooldown_s_left)}`
+                  : ''}
+              </td>
               <td className="muted err">{t.banned_reason || ''}</td>
               <td>
                 <button

@@ -48,6 +48,9 @@ class Token(Base):
     max_concurrency: Mapped[int] = mapped_column(Integer, default=1)
     in_use: Mapped[int] = mapped_column(Integer, default=0)
     fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    # which usage window exhausted: 5h | weekly | monthly | None
+    quota_window: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    quota_exhausted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     banned_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     banned_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)

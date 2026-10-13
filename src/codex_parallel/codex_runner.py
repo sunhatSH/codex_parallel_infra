@@ -23,6 +23,7 @@ class CodexRunResult:
     auth_failed: bool
     timed_out: bool
     transient: bool = False
+    quota_window: str | None = None  # "5h" | "weekly" | "monthly" | None
     stdout: str = ""
     stderr: str = ""
     last_message: str = ""
@@ -36,6 +37,9 @@ class CodexRunResult:
         """Failure attribution for the health module.
 
         account_dead  → credential rejected; scheduler must swap to a NEW token
+        quota_5h / quota_weekly / quota_monthly
+                       → account fine but that usage window is exhausted;
+                         token goes on a window-length cooldown
         transient     → retry the SAME token (3 chances total)
         timeout/failed → infra-level failure, also retried on same token
         """
@@ -45,6 +49,8 @@ class CodexRunResult:
             return "timeout"
         if self.auth_failed:
             return "account_dead"
+        if self.quota_window:
+            return f"quota_{self.quota_window}"
         if self.transient:
             return "transient"
         return "failed"
@@ -60,29 +66,43 @@ ACCOUNT_DEAD_MARKERS = (
     "invalid_api_key",
     "account suspended",
     "account disabled",
+    "account banned",
+    "deactivated",
     "token expired",
     "session expired",
     "not logged in",
     "login required",
 )
 
-# Markers meaning a transient problem → same token gets retried (3 chances).
-TRANSIENT_MARKERS = (
-    "timeout",
-    "timed out",
+# Quota-exhaustion markers → the account is FINE but out of usage for a
+# window. Codex surfaces usage limits as 429s carrying window hints.
+QUOTA_WINDOW_MARKERS = {
+    "5h": (
+        "rate limited",
+        "usage limit reached",
+        "you've hit your usage limit",
+        "you've reached your usage limit",
+        "weekly limit",
+    ),
+    "weekly": (
+        "weekly limit reached",
+        "weekly usage limit",
+        "your weekly limit",
+    ),
+    "monthly": (
+        "monthly limit reached",
+        "monthly usage limit",
+        "your monthly limit",
+    ),
+}
+# Fallback window when the payload clearly signals quota but names no window.
+QUOTA_GENERIC_MARKERS = (
+    "429",
+    "quota",
     "rate limit",
     "rate_limit",
     "too many requests",
-    "429",
-    "502",
-    "503",
-    "504",
-    "overloaded",
-    "network",
-    "connection reset",
-    "connection refused",
-    "econnreset",
-    "temporarily unavailable",
+    "usage limit",
 )
 
 
@@ -202,8 +222,17 @@ class CodexRunner:
             and not res.timed_out
             and self._account_dead(combined)
         )
+        quota_window = (
+            self._quota_window(combined)
+            if (not res.ok and not res.timed_out and not auth_failed)
+            else None
+        )
         transient = (
-            not res.ok and not res.timed_out and not auth_failed and self._transient(combined)
+            not res.ok
+            and not res.timed_out
+            and not auth_failed
+            and quota_window is None
+            and self._transient(combined)
         )
         return CodexRunResult(
             ok=res.ok,
@@ -211,6 +240,7 @@ class CodexRunner:
             auth_failed=auth_failed,
             timed_out=res.timed_out,
             transient=transient,
+            quota_window=quota_window,
             stdout=res.stdout[-20000:],
             stderr=res.stderr[-8000:],
             last_message=last_message,
@@ -322,6 +352,40 @@ class CodexRunner:
         return any(marker in lowered for marker in ACCOUNT_DEAD_MARKERS)
 
     @staticmethod
+    def _quota_window(combined: str) -> str | None:
+        """Which usage window is exhausted, or None if not a quota error."""
+        lowered = combined.lower()
+        for window in ("monthly", "weekly"):
+            for marker in QUOTA_WINDOW_MARKERS[window]:
+                if marker in lowered:
+                    return window
+        for marker in QUOTA_WINDOW_MARKERS["5h"]:
+            if marker in lowered:
+                return "5h"
+        # generic quota signal without a named window → assume the shortest
+        # (5h) so the account returns soonest; a real weekly/monthly limit
+        # re-triggers and escalates on the next strike.
+        for marker in QUOTA_GENERIC_MARKERS:
+            if marker in lowered:
+                return "5h"
+        return None
+
+    @staticmethod
     def _transient(combined: str) -> bool:
         lowered = combined.lower()
-        return any(marker in lowered for marker in TRANSIENT_MARKERS)
+        return any(
+            marker in lowered
+            for marker in (
+                "timeout",
+                "timed out",
+                "502",
+                "503",
+                "504",
+                "overloaded",
+                "network",
+                "connection reset",
+                "connection refused",
+                "econnreset",
+                "temporarily unavailable",
+            )
+        )

@@ -472,6 +472,14 @@ class Scheduler:
                     log.warning(
                         "item %s: token %s retired (%s)", item_id, token.label, att.reason
                     )
+                elif att.cooldown_token:
+                    # usage window exhausted: park for the window, not banned
+                    window = att.kind.removeprefix("quota_")
+                    self._tokens.report_quota_exhausted(token.id, window)
+                    log.info(
+                        "item %s: token %s quota exhausted (%s), cooling down",
+                        item_id, token.label, window,
+                    )
                 else:
                     self._tokens.report_failure(token.id)
 
@@ -602,27 +610,46 @@ class Scheduler:
         """Get a token or None.
 
         quick_exhausted=True → return None as soon as the pool is definitively
-        empty (no active tokens at all) instead of waiting out the backoff.
-        Used on retry loops where waiting would only stall the item.
+        unusable — no active tokens at all, or every active token is parked
+        on a quota cooldown longer than we're willing to stall this item
+        (cooldown > max_wait_s). Banned/discarded/disabled never count.
         """
-        if quick_exhausted:
-            stats = self._tokens.stats()
-            if stats["active"] == 0:
-                return None
+        if quick_exhausted and self._pool_definitively_empty(max_wait_s):
+            return None
         waited = 0.0
         delay = TOKEN_WAIT_BASE_S
         while waited < max_wait_s:
             try:
                 return await asyncio.to_thread(self._tokens.acquire)
             except NoTokenAvailable:
-                if quick_exhausted:
-                    stats = self._tokens.stats()
-                    if stats["active"] == 0:
-                        return None
+                if quick_exhausted and self._pool_definitively_empty(max_wait_s):
+                    return None
                 await asyncio.sleep(delay + random.random())
                 waited += delay
                 delay = min(delay * 2, 30.0)
         return None
+
+    def _pool_definitively_empty(self, horizon_s: float) -> bool:
+        """True when no token can become acquirable within horizon_s.
+
+        A token on a 5h/7d/30d quota cooldown is 'active' but unreachable —
+        if ALL reachable tokens are like that, waiting the backoff window
+        is pointless; the item should fail fast and alert.
+        """
+        import datetime as dt
+
+        horizon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=horizon_s)
+        for t in self._tokens.list_tokens():
+            if t.status != "active":
+                continue
+            if t.cooldown_until is None:
+                return False  # acquirable right now
+            cu = t.cooldown_until
+            if cu.tzinfo is None:
+                cu = cu.replace(tzinfo=dt.timezone.utc)
+            if cu <= horizon:
+                return False  # frees up soon enough to be worth waiting
+        return True
 
     # ── item outcome writers ─────────────────────────────────────────── #
 

@@ -50,6 +50,18 @@ case "$MODE" in
     echo "Error: 401 Unauthorized - invalid api key or account suspended" >&2
     exit 1
     ;;
+  quota-5h)
+    echo "Error: You've reached your usage limit. Your limit will reset soon." >&2
+    exit 1
+    ;;
+  quota-weekly)
+    echo "Error: weekly limit reached — upgrade or wait for the reset" >&2
+    exit 1
+    ;;
+  quota-monthly)
+    echo "Error: monthly usage limit exceeded" >&2
+    exit 1
+    ;;
   transient)
     echo "Error: 429 Too Many Requests - rate limit exceeded, retry later" >&2
     exit 1
