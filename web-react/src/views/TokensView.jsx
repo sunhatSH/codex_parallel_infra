@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import api from '../api.js'
 import Badge from '../components/Badge.jsx'
 
 export default function TokensView({ toast }) {
   const [tokens, setTokens] = useState([])
+  const fileRef = useRef(null)
 
   async function refresh() {
     try {
@@ -43,6 +44,33 @@ export default function TokensView({ toast }) {
     }
   }
 
+  async function uploadXlsx(ev) {
+    ev.preventDefault()
+    const f = fileRef.current?.files?.[0]
+    if (!f) {
+      toast('先选择 xlsx 文件')
+      return
+    }
+    const b64 = await new Promise((res, rej) => {
+      const r = new FileReader()
+      r.onload = () => res(String(r.result).split(',')[1])
+      r.onerror = rej
+      r.readAsDataURL(f)
+    })
+    try {
+      const r = await api('/api/tokens/import-xlsx', {
+        method: 'POST',
+        body: JSON.stringify({ blob: b64 }),
+      })
+      const skipped = r.skipped?.length ? `，跳过 ${r.skipped.length}` : ''
+      toast(`已导入 ${r.added.length} 个账户${skipped}`)
+      if (fileRef.current) fileRef.current.value = ''
+      refresh()
+    } catch (e) {
+      toast(`导入失败: ${e.message}`)
+    }
+  }
+
   async function toggle(id, status) {
     try {
       await api(`/api/tokens/${id}/status`, {
@@ -57,10 +85,15 @@ export default function TokensView({ toast }) {
 
   return (
     <>
+      <form className="toolbar" onSubmit={uploadXlsx}>
+        <input ref={fileRef} type="file" accept=".xlsx" style={{ maxWidth: 320 }} />
+        <button className="primary" type="submit">导入 xlsx 账户</button>
+        <span className="muted">自动解析每行的 refresh token / token bundle</span>
+      </form>
       <form className="toolbar" onSubmit={bulkAdd}>
         <input name="prefix" defaultValue="bulk" placeholder="label 前缀" style={{ maxWidth: 140 }} />
         <button className="primary" type="submit">批量导入</button>
-        <span className="muted">在下方粘贴 tokens，每行一个</span>
+        <span className="muted">或粘贴裸 token，每行一个</span>
       </form>
       <div className="toolbar">
         <textarea name="blob" placeholder={'token1\ntoken2\ntoken3 ...'} />
