@@ -325,7 +325,7 @@ class Scheduler:
     ) -> None:
         runner = CodexRunner(
             codex_bin=codex_config.get("codex_bin", "codex"),
-            model=codex_config.get("model"),
+            model=codex_config.get("model") or "gpt-5.5",  # None would override the dataclass default
             sandbox_mode=codex_config.get("sandbox_mode", "workspace-write"),
             reasoning_effort=codex_config.get("reasoning_effort"),
             extra_args=list(codex_config.get("extra_args", [])),

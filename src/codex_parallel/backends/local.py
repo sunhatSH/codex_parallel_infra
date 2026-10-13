@@ -41,6 +41,7 @@ class LocalSandbox:
                 *cmd,
                 cwd=str(self.workdir),
                 env=full_env,
+                stdin=asyncio.subprocess.DEVNULL,  # codex reads stdin for extra input → must EOF immediately
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=64 * 1024 * 1024,

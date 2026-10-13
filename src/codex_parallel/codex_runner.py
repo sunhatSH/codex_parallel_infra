@@ -109,7 +109,10 @@ QUOTA_GENERIC_MARKERS = (
 @dataclass
 class CodexRunner:
     codex_bin: str = "codex"
-    model: str | None = None
+    # ChatGPT (prolite) accounts reject some default model choices with
+    # "'gpt-5.4' model is not supported when using Codex with a ChatGPT
+    # account" (400). gpt-5.5 is the verified-working default.
+    model: str | None = "gpt-5.5"
     sandbox_mode: str = "workspace-write"
     reasoning_effort: str | None = None
     extra_args: list[str] = field(default_factory=list)
